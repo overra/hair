@@ -11,8 +11,9 @@ Snippet convention: each `ts` block type-checks on its own. The only page global
 - **Type-checking:** upstream type-checks with `typescript: npm:tsover@^6.0.2` (`pnpm-workspace.yaml`), a TypeScript fork with vector operator typing. Stock `tsc` 5.9 rejects `vec + number` (TS2365). Snippets were checked with tsover 6.0.3, `strict`, and the docs-app settings (no `noUncheckedIndexedAccess`).
 - **WGSL output:** shader code was compiled through `unplugin-typegpu/esbuild` and resolved with `tgpu.resolve` against a stub device. No GPU needed.
 - **Pipeline descriptors and buffer uploads:** captured with a mock device (`createRenderPipeline`, `createComputePipeline`, `queue.writeBuffer`).
-- **Not verified:** GPU execution, rendered output, performance.
-- **Harness:** `/tmp/claude-0/tgpu-research/verify/src/` (`shaders.ts`, `api.ts`, `extra.ts`, `buffers.ts`, `descr.ts`, `uses.ts`).
+- **Doc blocks:** each `ts` block was type-checked, then executed against a stub device (plain objects that record `createShaderModule`; TypeGPU's resolution runs for real). A block fails if resolution throws. Each block's captured WGSL was checked for the claims made next to it.
+- **Not verified:** GPU execution, rendered output, performance. The stub does not validate WGSL.
+- **Harness:** `/tmp/claude-0/tgpu-research/verify/` (`src/*.ts` for the checks, `doc/` and `docrun/` for the reference blocks).
 
 Dependencies:
 
@@ -73,7 +74,7 @@ Sizes and alignments verified in Node with `d.sizeOf` and `d.alignmentOf`:
 | `vec4f` | 16 | 16 | |
 | `mat2x2f` / `mat3x3f` / `mat4x4f` | 16 / 48 / 64 | 8 / 16 / 16 | column-major |
 | `struct {pos: vec3f, vel: f32}` | 16 | 16 | `f32` fills the vec3 tail |
-| `struct {pos, vel: vec3f, life: f32}` | 32 | 16 | |
+| `struct {pos: vec3f, vel: vec3f, life: f32}` | 32 | 16 | |
 | `arrayOf(vec3f, 4)` | 64 | 16 | stride 16 |
 | `arrayOf(vec2f, 3)` | 24 | 8 | stride 8 |
 | `arrayOf(f16, 5)` | 10 | 2 | stride 2 |
@@ -116,7 +117,7 @@ const first = await hairs.read();                      // async; allocates a sta
 - `root.createUniform` / `createReadonly` / `createMutable` (`rootTypes.d.ts:331`, `:367`, `:349`) return bindings with usage already set (`init.js:223-237`). They can be used directly in shaders (section 5).
 - `buf.$usage(...usages)` (`buffer.d.ts:79`). Default flags are `COPY_SRC | COPY_DST` (`buffer.js:60`). Flags are read when the GPU buffer is first materialized (`buffer.js:87`), which happens on the first write, bind or unwrap. Call `$usage` right after creation.
 - `buf.as('mutable' | 'readonly' | 'uniform')` (`buffer.d.ts:84`). Storage access requires `$usage('storage')` first (`core/buffer/bufferBinding.js:120-126`).
-- `write` and `patch` go through a host mirror and `queue.writeBuffer` (`buffer.js:195-241`). Offsets are bytes. A range that is not 4-byte aligned throws `Cannot write to bytes 2-4 ... WebGPU requires writes to start and end at a multiple of 4 bytes` (verified; `buffer.js:222`).
+- `write` and `patch` go through a host mirror and `queue.writeBuffer` (`buffer.js:195`, `:236`). Offsets are bytes. A range that is not 4-byte aligned throws `Cannot write to bytes 2-4 ... WebGPU requires writes to start and end at a multiple of 4 bytes` (verified; `buffer.js:222`).
 - `patch` on an array uploads only the touched elements (verified: `patch({2: ...})` uploaded 12 bytes at offset 32).
 - Typed arrays and `ArrayBuffer`s are copied without interpretation (`docs apis/buffers.mdx`, "Permissive write inputs").
 - `read()` on a buffer without `MAP_READ` allocates a staging buffer per call (`buffer.js:297`). Do not call it every frame.
@@ -174,7 +175,7 @@ const sim = tgpu.computeFn({
 })((input) => {
   'use gpu';
   const i = input.gid.x;
-  void i;
+  // Use `i` in real code, e.g. as an index into a storage buffer.
 });
 
 const vs = tgpu.vertexFn({
@@ -330,7 +331,7 @@ simPipe.with(simBG).dispatchWorkgroups(Math.ceil(N / 64));
 // Batch several dispatches into one submission
 const enc = root['~unstable'].createCommandEncoder();
 const pass = enc.beginComputePass();
-simPipe.with(pass).dispatchWorkgroups(Math.ceil(N / 64));
+simPipe.with(simBG).with(pass).dispatchWorkgroups(Math.ceil(N / 64));
 pass.end();
 enc.submit();
 
@@ -474,7 +475,10 @@ const meshPipe = root.createRenderPipeline({
   },
   targets: { format: 'rgba8unorm' },
 });
-meshPipe.with(pos, positionBuffer).draw(3);
+meshPipe
+  .withColorAttachment({ view: context })
+  .with(pos, positionBuffer)
+  .draw(3);
 ```
 
 For instance data, use `tgpu.vertexLayout(d.disarrayOf(d.vec3f), 'instance')` (packed, stride 12).
