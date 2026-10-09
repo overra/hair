@@ -1,5 +1,7 @@
 # hair
 
+![Head groom](docs/images/head.png)
+
 A procedural, parametric, real-time strand hair system on **WebGPU** (via **TypeGPU**), aiming for **120 fps**.
 It covers a full-body hair atlas, which you can groom, cut, shave and style, and run fingers through.
 

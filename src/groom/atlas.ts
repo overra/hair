@@ -308,7 +308,7 @@ export const REGIONS: RegionDef[] = [
       const elDeg = el / DEG;
       if (azDeg > 100) return 0;
       // Cheek line: from sideburn base down toward the mouth corner.
-      const cheek = table(azDeg, [[0, -14], [25, -14], [45, -16], [70, -14], [85, -10], [100, -18]]);
+      const cheek = table(azDeg, [[0, -20], [25, -24], [45, -27], [70, -21], [85, -12], [100, -18]]);
       let w = smoothstep(cheek + 2, cheek - 3, elDeg);
       // Neck line under the jaw.
       w *= smoothstep(-0.135, -0.11, q[1]);
