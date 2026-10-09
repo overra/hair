@@ -33,6 +33,13 @@ fn qPartial(a: vec3f, b: vec3f, t: f32) -> vec4f {
   return qnlerp(vec4f(0.0, 0.0, 0.0, 1.0), qFromTo(a, b), t);
 }
 
+fn sdCapsule(p: vec3f, a: vec3f, b: vec3f, r: f32) -> f32 {
+  let pa = p - a;
+  let ba = b - a;
+  let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-12), 0.0, 1.0);
+  return length(pa - ba * h) - r;
+}
+
 fn pcg(v: u32) -> u32 {
   let state = v * 747796405u + 2891336453u;
   let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -48,5 +55,33 @@ fn hash31(v: u32) -> vec3f {
 fn anyPerp(n: vec3f) -> vec3f {
   let a = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(n.x) < 0.9);
   return normalize(cross(n, a));
+}
+`;
+
+/**
+ * Finger contact (requires the frame layout as F): pushes p out of every finger
+ * capsule by 'margin'. Returns the corrected point and, in w, 1 if it touched.
+ */
+export const handWgsl = /* wgsl */ `
+fn handContact(p: vec3f, margin: f32) -> vec4f {
+  let count = u32(F.$.frame.hand.w);
+  var q = p;
+  var touched = 0.0;
+  for (var k = 0u; k < count; k++) {
+    let A = F.$.frame.fingers[2u * k];
+    let B = F.$.frame.fingers[2u * k + 1u];
+    let ab = B.xyz - A.xyz;
+    let h = clamp(dot(q - A.xyz, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0);
+    let c = A.xyz + ab * h;
+    let dv = q - c;
+    let dist = length(dv);
+    let r = A.w + margin;
+    if (dist < r) {
+      let n = select(normalize(cross(ab, vec3f(0.0, 1.0, 0.0)) + vec3f(1e-4)), dv / dist, dist > 1e-7);
+      q = c + n * r;
+      touched = 1.0;
+    }
+  }
+  return vec4f(q, touched);
 }
 `;

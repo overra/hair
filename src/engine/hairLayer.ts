@@ -16,6 +16,7 @@ export class HairLayer {
   geometry: LayerGeometry | null = null;
   needsGrow = false;
   private buffers: { destroy(): void }[] = [];
+  private named: Record<string, unknown> = {};
   private paramsBuf;
   computeGroup: GPUBindGroup | null = null;
   drawGroup: GPUBindGroup | null = null;
@@ -56,6 +57,7 @@ export class HairLayer {
     const gQ = root.createBuffer(d.arrayOf(d.vec4f, N * G)).$usage('storage');
     const render = root.createBuffer(d.arrayOf(d.vec4f, M * S)).$usage('storage');
     this.buffers.push(statics, restS, guideStrand, gPos, gPrev, gQ, render);
+    this.named = { statics, restS, guideStrand, gPos, gPrev, gQ, render };
     this.writeParams();
     this.computeGroup = root.unwrap(
       root.createBindGroup(layerLayout, { params: this.paramsBuf, statics, restS, guideStrand, gPos, gPrev, gQ, render }),
@@ -82,6 +84,20 @@ export class HairLayer {
     const droop = 22 * physics.gravity * (1 - 0.6 * physics.bendStiffness) * (1 + 0.5 * wet);
     f.set([droop, 1.2, 0, 0], 28);
     this.paramsBuf.write(buf);
+  }
+
+  /** Read a GPU buffer back as raw floats (debugging / tests). */
+  async debugRead(name: 'statics' | 'restS' | 'guideStrand' | 'gPos' | 'gPrev' | 'gQ' | 'render') {
+    const src = (this.root.unwrap as (x: unknown) => GPUBuffer)(this.named[name]);
+    const device = this.root.device;
+    const dst = device.createBuffer({ size: src.size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, 0, dst, 0, src.size);
+    device.queue.submit([enc.finish()]);
+    await dst.mapAsync(GPUMapMode.READ);
+    const out = new Float32Array(dst.getMappedRange().slice(0));
+    dst.destroy();
+    return out;
   }
 
   destroy() {

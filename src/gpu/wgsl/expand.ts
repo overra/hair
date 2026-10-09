@@ -127,6 +127,11 @@ fn expand(@builtin(global_invocation_id) gid: vec3u) {
     if (frizz > 0.0) {
       p += hash31(seed * 7u + j * 13u) * frizz * 0.004 * t * t * min(len / 0.05, 1.0);
     }
+    if (F.$.frame.hand.w > 0.0) {
+      // Follower contact correction: a render strand may not cross a finger even
+      // when its guide passes on the other side.
+      p = handContact(p, diameter).xyz;
+    }
     let tipT = clamp((1.0 - t) / tipTaper, 0.0, 1.0);
     let width = diameter * mix(0.15, 1.0, sqrt(tipT));
     L.$.render[s * M + j] = vec4f(p, width);

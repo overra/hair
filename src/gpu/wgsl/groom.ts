@@ -77,8 +77,10 @@ fn grow(@builtin(global_invocation_id) gid: vec3u) {
 
     if (isLash) {
       // Planar arc curling toward the flow direction (up for upper lashes).
-      let bend = normalize(st.flow.xyz - dir * dot(st.flow.xyz, dir));
-      dir = normalize(dir + bend * ds / max(st.curl.x, 1e-3));
+      let bendV = st.flow.xyz - dir * dot(st.flow.xyz, dir);
+      if (dot(bendV, bendV) > 1e-10) {
+        dir = normalize(dir + normalize(bendV) * ds / max(st.curl.x, 1e-3));
+      }
     } else {
       let sd = bodySdf(p);
       if (sd < shell + 0.02) {
@@ -210,8 +212,10 @@ fn cut(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 /**
- * Comb tool: rotates rest segments inside the brush toward the drag direction,
- * carrying the rest of the strand (and its curl) rigidly with them.
+ * Comb tool (displacement brush, like Blender's curves comb): rest points under
+ * the brush move with the brush's per-frame displacement, then segment lengths
+ * are restored root → tip and points are kept above the skin. Points beyond the
+ * brush follow rigidly, so curls downstream of the brush are preserved.
  */
 @compute @workgroup_size(64)
 fn comb(@builtin(global_invocation_id) gid: vec3u) {
@@ -220,39 +224,34 @@ fn comb(@builtin(global_invocation_id) gid: vec3u) {
   let n = NP();
   let M = L.$.params.counts.w;
   let st = L.$.statics[s];
-  let drag = F.$.frame.brush2.xyz;
-  let strength = F.$.frame.brush2.w;
-  if (dot(drag, drag) < 1e-10) { return; }
-  let dragDir = normalize(drag);
+  let drag = F.$.frame.brush2.xyz * F.$.frame.brush2.w;
+  if (dot(drag, drag) < 1e-14) { return; }
 
   var hit = false;
   for (var i = 0u; i < n; i++) {
     tmp[i] = L.$.restS[i * S() + s];
     let j = (i * (M - 1u)) / max(n - 1u, 1u);
     let w = brushWeight(L.$.render[s * M + j].xyz);
-    tmp[i].w = w; // reuse w as the brush weight; arc is rebuilt below
+    tmp[i].w = w;
     hit = hit || w > 0.0;
   }
   if (!hit) { return; }
   let shell = st.misc.z * 0.5 + 0.0003;
-  var q = vec4f(0.0, 0.0, 0.0, 1.0);
   var prevOld = tmp[0].xyz;
   var prevNew = tmp[0].xyz;
+  var carry = vec3f(0.0); // displacement inherited from points closer to the root
   var arc = 0.0;
   for (var i = 1u; i < n; i++) {
     let old = tmp[i].xyz;
-    var seg = qrot(q, old - prevOld);
-    let segLen = length(seg);
-    let w = tmp[i - 1u].w;
-    if (w > 0.0 && segLen > 1e-7) {
-      let sd = seg / segLen;
-      // Combing pulls toward the drag direction, never into the skin.
-      let r = qPartial(sd, normalize(sd + dragDir * 2.0), clamp(w * strength, 0.0, 1.0));
-      q = qmul(r, q);
-      seg = qrot(r, seg);
-    }
-    var p = keepOutside(prevNew + seg, shell);
+    let segLen = distance(old, prevOld);
+    // Root-side points barely move; the brush acts more strongly toward the tip.
+    let w = tmp[i].w * smoothstep(0.0, 0.25, f32(i) / f32(n - 1u));
+    carry = mix(carry, drag, w);
+    var p = old + carry;
     p = prevNew + normalize(p - prevNew) * segLen;
+    p = keepOutside(p, shell);
+    p = prevNew + normalize(p - prevNew) * segLen;
+    carry = p - old;
     arc += segLen;
     L.$.restS[i * S() + s] = vec4f(p, arc);
     prevOld = old;

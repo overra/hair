@@ -30,8 +30,8 @@ const both = (p: Primitive) => [p, mirror(p)];
 export const LANDMARKS = {
   headCenter: [0, 1.655, -0.012] as V3,
   crownWhorl: [0.012, 1.745, -0.055] as V3,
-  eyeL: [0.032, 1.637, 0.074] as V3, // subject's left = +x
-  eyeR: [-0.032, 1.637, 0.074] as V3,
+  eyeL: [0.032, 1.637, 0.078] as V3, // subject's left = +x
+  eyeR: [-0.032, 1.637, 0.078] as V3,
   eyeRadius: 0.0125,
   mouth: [0, 1.566, 0.098] as V3,
   chin: [0, 1.528, 0.078] as V3,

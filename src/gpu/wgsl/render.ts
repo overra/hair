@@ -231,14 +231,34 @@ fn bodyFS(in: BodyOut) -> @location(0) vec4f {
   let N = normalize(in.normal);
   let V = normalize(F.$.frame.camPos.xyz - in.world);
   let Lt = normalize(F.$.frame.lightDir.xyz);
-  let skin = vec3f(0.62, 0.42, 0.33);
+  // Landmark-driven face detail (body space): eyes and lips.
+  let bp = (F.$.frame.modelInv * vec4f(in.world, 1.0)).xyz;
+  var skin = vec3f(0.52, 0.34, 0.26);
+  var specK = 0.08;
+  var gloss = 40.0;
+  for (var e = 0; e < 2; e++) {
+    let ec = vec3f(select(-0.032, 0.032, e == 0), 1.637, 0.078);
+    let q = bp - ec;
+    if (length(q) < 0.0135) {
+      let dir = normalize(q);
+      let gaze = acos(clamp(dir.z, -1.0, 1.0));
+      skin = vec3f(0.8, 0.78, 0.75);
+      if (gaze < 0.42) { skin = vec3f(0.22, 0.15, 0.09); }
+      if (gaze < 0.2) { skin = vec3f(0.01); }
+      specK = 0.6;
+      gloss = 300.0;
+    }
+  }
+  let m = bp - vec3f(0.0, 1.566, 0.098);
+  let lip = length(vec2f(m.x / 0.024, m.y / 0.0085));
+  skin = mix(skin, vec3f(0.5, 0.22, 0.2), (1.0 - smoothstep(0.8, 1.05, lip)) * step(-0.02, m.z));
   let ndl = dot(N, Lt);
   // Wrapped diffuse with a reddish terminator as a cheap subsurface hint.
   let wrap = clamp((ndl + 0.3) / 1.3, 0.0, 1.0);
   let sss = vec3f(1.0, 0.45, 0.3) * clamp((ndl + 0.5) / 1.5, 0.0, 1.0) * (1.0 - wrap) * 0.25;
   let vis = lightVisibility(in.world, N);
   let H = normalize(Lt + V);
-  let spec = pow(max(dot(N, H), 0.0), 40.0) * 0.08 * step(0.0, ndl);
+  let spec = pow(max(dot(N, H), 0.0), gloss) * specK * step(0.0, ndl);
   let direct = (skin * wrap + sss + spec) * F.$.frame.lightDir.w * vis;
   let c = direct + skin * sky(N) * 0.6;
   return vec4f(tonemap(c), 1.0);

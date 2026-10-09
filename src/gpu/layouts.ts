@@ -26,9 +26,12 @@ export const LayerParams = d.struct({
   growth: d.vec4f, // droop (1/m), clumpProfile, seed, unused
 });
 
+export const MAX_FINGERS = 5;
+
 /** Per-frame values shared by all layers. */
 export const FrameParams = d.struct({
   model: d.mat4x4f, // body → world
+  modelInv: d.mat4x4f, // world → body
   modelRot: d.vec4f, // rotation quaternion of `model`
   viewProj: d.mat4x4f,
   lightViewProj: d.mat4x4f,
@@ -40,7 +43,10 @@ export const FrameParams = d.struct({
   brush: d.vec4f, // screen x, y (px), radius (px), mode
   brush2: d.vec4f, // drag direction in body space, strength
   brush3: d.vec4f, // guard length (m), falloff, active (0/1), unused
-  shadow: d.vec4f, // hair density (1/m), bias, map size, unused
+  shadow: d.vec4f, // hair density (1/m), bias, map size, light depth range (m)
+  hand: d.vec4f, // per-substep hand displacement xyz (world), finger count
+  hand2: d.vec4f, // friction, contact margin, unused, unused
+  fingers: d.arrayOf(d.vec4f, 2 * MAX_FINGERS), // per finger: (a.xyz, radius), (b.xyz, 0)
 });
 
 /** Group 0: one layer's buffers, writable (compute). */

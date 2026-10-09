@@ -25,6 +25,8 @@ export interface CharacterParams {
   part: number;
   /** Whether a part line is used at all. */
   usePart: boolean;
+  /** Front hairline: 0 = swept back / to the side, 1 = falls forward as bangs. */
+  fringe: number;
   seed: number;
 }
 
@@ -34,6 +36,7 @@ export const defaultCharacter = (): CharacterParams => ({
   whorlSpin: 1,
   part: 0.35,
   usePart: true,
+  fringe: 0.2,
   seed: 1,
 });
 
@@ -202,6 +205,15 @@ export const REGIONS: RegionDef[] = [
         const away: V3 = [side, -0.25, 0];
         d = normalize(add(scale(normalize(d), 1 - nearTop), scale(away, nearTop * 1.5)));
       }
+      // Front hairline: sweep away from the face unless bangs are wanted.
+      {
+        const { az, el } = headAngles(p);
+        const front = (1 - smoothstep(0.6, 1.3, Math.abs(az))) * (1 - smoothstep(0.75, 1.2, el));
+        const side = Math.sign(p[0] - (c.usePart ? c.part * 0.045 : 0)) || 1;
+        const sweep: V3 = [side * 0.8, 0.15, -1];
+        const w = front * (1 - c.fringe);
+        d = normalize(add(scale(normalize(d), 1 - w), scale(normalize(sweep), w * 1.5)));
+      }
       // Bias downward on the sides and back.
       return add(normalize(d), [0, -0.35, 0]);
     },
@@ -255,7 +267,7 @@ export const REGIONS: RegionDef[] = [
     flow: () => [0, 1, 0],
     defaults: (p) => {
       Object.assign(p.shape, {
-        density: 130, length: 0.0095, lengthVar: 0.3, diameter: 110, rootLift: 0,
+        density: 130, length: 0.0095, lengthVar: 0.3, diameter: 110, rootLift: 65,
         tipTaper: 0.6, frizz: 0.02, curlRadius: 0.009,
       });
       p.look.eumelanin = 6;
@@ -274,7 +286,7 @@ export const REGIONS: RegionDef[] = [
     flow: () => [0, -1, 0],
     defaults: (p) => {
       Object.assign(p.shape, {
-        density: 70, length: 0.0055, lengthVar: 0.3, diameter: 80, rootLift: 0,
+        density: 70, length: 0.0055, lengthVar: 0.3, diameter: 80, rootLift: 70,
         tipTaper: 0.6, frizz: 0.02, curlRadius: 0.012,
       });
       p.look.eumelanin = 5;

@@ -5,10 +5,11 @@
 import tgpu, { d } from 'typegpu';
 import type { TgpuRoot } from 'typegpu';
 import type { BodyMesh } from '../body/mesher';
-import { FrameParams, drawLayout, frameLayout, layerLayout, shadowLayout, toolLayout } from '../gpu/layouts';
+import { FrameParams, MAX_FINGERS, drawLayout, frameLayout, layerLayout, shadowLayout, toolLayout } from '../gpu/layouts';
 import { buildShaderSources } from '../gpu/shaders';
 import type { HairLayer } from './hairLayer';
 import { GpuTimer } from './timer';
+import { invert } from '../math/mat';
 
 export const MSAA = 4;
 export const SHADOW_SIZE = 2048;
@@ -32,11 +33,20 @@ export interface FrameState {
   brush: { x: number; y: number; radius: number; mode: number; drag: [number, number, number]; strength: number; guard: number; falloff: number; active: boolean };
   shadowDensity: number;
   resetSim: boolean;
+  hand: {
+    /** Finger capsules in world space. */
+    capsules: { a: number[]; b: number[]; r: number }[];
+    /** World displacement of the hand this frame. */
+    displacement: number[];
+    friction: number;
+    margin: number;
+  };
 }
 
 export const TOOL_CUT = 1;
 export const TOOL_CLIP = 2;
 export const TOOL_COMB = 3;
+export const TOOL_HAND = 4;
 
 export class Renderer {
   readonly device: GPUDevice;
@@ -53,6 +63,7 @@ export class Renderer {
   private colorTex: GPUTexture | null = null;
   private depthTex: GPUTexture | null = null;
   private body: { vbuf: GPUBuffer; ibuf: GPUBuffer; count: number } | null = null;
+  private hand: { vbuf: GPUBuffer; ibuf: GPUBuffer; count: number } | null = null;
   layers: HairLayer[] = [];
   width = 1;
   height = 1;
@@ -201,6 +212,35 @@ export class Renderer {
     this.body = { vbuf, ibuf, count: mesh.indices.length };
   }
 
+  /** Upload the hand mesh (body space, interleaved position + normal); empty hides it. */
+  setHandMesh(vertices: Float32Array, indices: Uint32Array) {
+    if (indices.length === 0) {
+      if (this.hand) this.hand.count = 0;
+      return;
+    }
+    if (!this.hand || this.hand.vbuf.size < vertices.byteLength || this.hand.ibuf.size < indices.byteLength) {
+      this.hand?.vbuf.destroy();
+      this.hand?.ibuf.destroy();
+      this.hand = {
+        vbuf: this.device.createBuffer({ size: vertices.byteLength * 2, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }),
+        ibuf: this.device.createBuffer({ size: indices.byteLength * 2, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }),
+        count: 0,
+      };
+    }
+    this.device.queue.writeBuffer(this.hand.vbuf, 0, vertices as Float32Array<ArrayBuffer>);
+    this.device.queue.writeBuffer(this.hand.ibuf, 0, indices as Uint32Array<ArrayBuffer>);
+    this.hand.count = indices.length;
+  }
+
+  private drawMeshes(pass: GPURenderPassEncoder) {
+    for (const m of [this.body, this.hand]) {
+      if (!m || m.count === 0) continue;
+      pass.setVertexBuffer(0, m.vbuf);
+      pass.setIndexBuffer(m.ibuf, 'uint32');
+      pass.drawIndexed(m.count);
+    }
+  }
+
   resize(width: number, height: number) {
     width = Math.max(1, Math.floor(width));
     height = Math.max(1, Math.floor(height));
@@ -229,6 +269,7 @@ export class Renderer {
     let o = 0;
     const put = (v: ArrayLike<number>) => { buf.set(v, o); o += v.length; };
     put(s.model);
+    put(invert(s.model));
     put(s.modelRot);
     put(s.viewProj);
     put(s.lightViewProj);
@@ -242,6 +283,14 @@ export class Renderer {
     put([...b.drag, b.strength]);
     put([b.guard, b.falloff, b.active ? 1 : 0, 0]);
     put([s.shadowDensity, 0.0015, SHADOW_SIZE, s.lightDepthRange]);
+    const h = s.hand;
+    const sub = Math.max(s.substeps, 1);
+    put([h.displacement[0] / sub, h.displacement[1] / sub, h.displacement[2] / sub, Math.min(h.capsules.length, MAX_FINGERS)]);
+    put([h.friction, h.margin, 0, 0]);
+    for (let k = 0; k < MAX_FINGERS; k++) {
+      const c = h.capsules[k];
+      put(c ? [...c.a, c.r, ...c.b, 0] : [0, 0, 0, 0, 0, 0, 0, 0]);
+    }
     this.frameBuf.write(buf.buffer as ArrayBuffer);
   }
 
@@ -272,7 +321,7 @@ export class Renderer {
           pass.dispatchWorkgroups(wg(l.guides));
           l.needsGrow = false;
         }
-        if (s.brush.active && s.frame > 0) {
+        if (s.brush.active && s.frame > 0 && s.brush.mode !== TOOL_HAND) {
           const tool = s.brush.mode === TOOL_COMB ? 'comb' : 'cut';
           pass.setPipeline(this.pipes[tool] as GPUComputePipeline);
           pass.dispatchWorkgroups(wg(l.strands));
@@ -302,14 +351,10 @@ export class Renderer {
         depthStencilAttachment: { view: this.bodyShadowTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
         timestampWrites: shadowWrites ? { querySet: shadowWrites.querySet, beginningOfPassWriteIndex: shadowWrites.beginningOfPassWriteIndex } : undefined,
       });
-      if (this.body) {
-        pass.setPipeline(this.pipes.bodyShadow as GPURenderPipeline);
-        pass.setBindGroup(0, this.emptyGroup);
-        pass.setBindGroup(1, this.frameGroup);
-        pass.setVertexBuffer(0, this.body.vbuf);
-        pass.setIndexBuffer(this.body.ibuf, 'uint32');
-        pass.drawIndexed(this.body.count);
-      }
+      pass.setPipeline(this.pipes.bodyShadow as GPURenderPipeline);
+      pass.setBindGroup(0, this.emptyGroup);
+      pass.setBindGroup(1, this.frameGroup);
+      this.drawMeshes(pass);
       pass.end();
     }
     {
@@ -342,13 +387,9 @@ export class Renderer {
       });
       pass.setBindGroup(1, this.frameGroup);
       pass.setBindGroup(2, this.shadowGroup);
-      if (this.body) {
-        pass.setPipeline(this.pipes.body as GPURenderPipeline);
-        pass.setBindGroup(0, this.emptyGroup);
-        pass.setVertexBuffer(0, this.body.vbuf);
-        pass.setIndexBuffer(this.body.ibuf, 'uint32');
-        pass.drawIndexed(this.body.count);
-      }
+      pass.setPipeline(this.pipes.body as GPURenderPipeline);
+      pass.setBindGroup(0, this.emptyGroup);
+      this.drawMeshes(pass);
       pass.setPipeline(this.pipes.hair as GPURenderPipeline);
       for (const l of layers) {
         pass.setBindGroup(0, l.drawGroup!);

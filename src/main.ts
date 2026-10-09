@@ -3,11 +3,12 @@ import { meshBody } from './body/mesher';
 import { LANDMARKS, raycastBody } from './body/sdf';
 import { OrbitCamera } from './app/camera';
 import { HairLayer } from './engine/hairLayer';
-import { type FrameState, Renderer, TOOL_CLIP, TOOL_COMB, TOOL_CUT } from './engine/renderer';
+import { type FrameState, Renderer, TOOL_CLIP, TOOL_COMB, TOOL_CUT, TOOL_HAND } from './engine/renderer';
+import { Hand, capsuleMesh, defaultHand } from './app/hand';
 import { REGIONS, type RegionId, defaultCharacter } from './groom/atlas';
 import { CURL_TYPES, type CurlType, PIGMENTS, type RegionParams, applyCurlType } from './groom/params';
 import { STYLES, applyStyle } from './groom/styles';
-import { lookAt, multiply, ortho, quatAxisAngle, quatConj, quatMul, quatRotate, rigid, type Q } from './math/mat';
+import { invert, lookAt, multiply, ortho, quatAxisAngle, quatConj, quatMul, quatRotate, rigid, transformPoint, type Q } from './math/mat';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('gfx');
@@ -20,7 +21,7 @@ const say = (msg: string | null) => {
 };
 const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
 
-type ToolName = 'orbit' | 'cut' | 'clipper' | 'comb';
+type ToolName = 'orbit' | 'cut' | 'clipper' | 'comb' | 'hand';
 
 const query = new URLSearchParams(location.search);
 const state = {
@@ -30,7 +31,8 @@ const state = {
   style: 'Shoulder wavy (2B)',
   sim: { substeps: 2, paused: query.has('pause'), wind: 0, windAzimuth: 90, turbulence: 0.6, shake: false },
   light: { azimuth: 35, elevation: 40, intensity: 1.8, shadowDensity: 220 },
-  tool: { mode: 'orbit' as ToolName, radius: 40, guardMm: 3, strength: 0.5, falloff: 0.5 },
+  tool: { mode: (query.get('tool') ?? 'orbit') as ToolName, radius: 40, guardMm: 3, strength: 1, falloff: 0.5 },
+  hand: defaultHand(),
 };
 
 async function main() {
@@ -84,6 +86,7 @@ async function main() {
   ch.add(state.character, 'usePart').name('part line').onChange(() => regen(['scalp']));
   ch.add(state.character, 'part', -1, 1, 0.01).name('part position').onChange(() => regen(['scalp']));
   ch.add(state.character, 'whorlSpin', -1, 1, 0.1).name('whorl spin').onChange(() => regen(['scalp']));
+  ch.add(state.character, 'fringe', 0, 1, 0.01).name('fringe / bangs').onChange(() => regen(['scalp']));
   ch.add(state.character, 'seed', 1, 999, 1).onChange(() => regen(allIds));
   ch.add(state, 'style', Object.keys(STYLES)).name('scalp style').onChange((name: string) => {
     const p = params.get('scalp')!;
@@ -169,12 +172,19 @@ async function main() {
   buildRegionFolder();
 
   const tools = gui.addFolder('Tools');
-  const toolCtl = tools.add(state.tool, 'mode', ['orbit', 'cut', 'clipper', 'comb']).name('tool');
+  const toolCtl = tools.add(state.tool, 'mode', ['orbit', 'cut', 'clipper', 'comb', 'hand']).name('tool');
   tools.add(state.tool, 'radius', 5, 200, 1).name('brush radius (px)');
   tools.add(state.tool, 'falloff', 0, 1, 0.01).name('brush falloff');
   tools.add(state.tool, 'guardMm', 0.3, 50, 0.1).name('clipper guard (mm)');
   tools.add(state.tool, 'strength', 0, 1, 0.01).name('comb strength');
   tools.add({ regrowAll: () => regen(allIds) }, 'regrowAll').name('regrow all hair');
+  const handF = tools.addFolder('Hand (fingers through hair)');
+  handF.add(state.hand, 'fingers', 1, 5, 1);
+  handF.add(state.hand, 'spacing', 0.01, 0.04, 0.001).name('finger spacing (m)');
+  handF.add(state.hand, 'radius', 0.004, 0.015, 0.0005).name('finger radius (m)');
+  handF.add(state.hand, 'friction', 0, 1, 0.01).name('finger friction');
+  handF.add(state.hand, 'depth', 0, 0.03, 0.001).name('fingertip height (m)');
+  handF.close();
 
   const simF = gui.addFolder('Simulation');
   simF.add(state.sim, 'substeps', 1, 8, 1);
@@ -200,6 +210,8 @@ async function main() {
   if (query.has('pitch')) cam.pitch = (Number(query.get('pitch')) * Math.PI) / 180;
   if (query.has('dist')) cam.distance = Number(query.get('dist'));
   if (query.has('ty')) cam.target[1] = Number(query.get('ty'));
+  if (query.has('tx')) cam.target[0] = Number(query.get('tx'));
+  if (query.has('tz')) cam.target[2] = Number(query.get('tz'));
   let headYaw = 0;
   let headTilt = 0;
   let drag: { button: number; x: number; y: number; shift: boolean } | null = null;
@@ -231,7 +243,7 @@ async function main() {
   canvas.addEventListener('pointercancel', end);
   canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.zoom(e.deltaY); }, { passive: false });
   window.addEventListener('keydown', (e) => {
-    const map: Record<string, ToolName> = { '1': 'orbit', '2': 'cut', '3': 'clipper', '4': 'comb' };
+    const map: Record<string, ToolName> = { '1': 'orbit', '2': 'cut', '3': 'clipper', '4': 'comb', '5': 'hand' };
     if (map[e.key]) toolCtl.setValue(map[e.key]);
     if (e.key === 'f') {
       // Focus on the point under the cursor.
@@ -247,6 +259,8 @@ async function main() {
   let frame = 0;
   let fps = 0;
   const neck = [0, 1.5, -0.02];
+  const hand = new Hand();
+  let lastModel = rigid([0, 0, 0, 1], neck, [0, 0, 0]);
   const loop = () => {
     const now = performance.now();
     const realDt = Math.min(0.05, (now - last) / 1000);
@@ -266,6 +280,7 @@ async function main() {
     }
     const q: Q = quatMul(quatAxisAngle([0, 1, 0], yaw), quatAxisAngle([1, 0, 0], tilt));
     const model = rigid(q, neck, [0, 0, 0]);
+    lastModel = model;
 
     const Ldir = [
       Math.cos((state.light.elevation * Math.PI) / 180) * Math.sin((state.light.azimuth * Math.PI) / 180),
@@ -288,7 +303,28 @@ async function main() {
     const dragW = [0, 1, 2].map((a) => (right[a] * mouse.dx - upv[a] * mouse.dy) * scale);
     mouse.dx = mouse.dy = 0;
     const dragBody = quatRotate(quatConj(q), dragW);
-    const toolMode = { orbit: 0, cut: TOOL_CUT, clipper: TOOL_CLIP, comb: TOOL_COMB }[state.tool.mode];
+    const toolMode = { orbit: 0, cut: TOOL_CUT, clipper: TOOL_CLIP, comb: TOOL_COMB, hand: TOOL_HAND }[state.tool.mode];
+
+    // Hand: posed in body space from the mouse ray, simulated in world space.
+    let handCaps: FrameState['hand']['capsules'] = [];
+    let handDisp = [0, 0, 0];
+    if (state.tool.mode === 'hand') {
+      const ray = cam.ray(mouse.x, mouse.y, canvas.clientWidth, canvas.clientHeight);
+      const qi = quatConj(q);
+      hand.update(
+        transformPoint(invert(model), ray.origin),
+        quatRotate(qi, ray.dir),
+        quatRotate(qi, right),
+        toolActive,
+        state.hand,
+      );
+      handCaps = hand.capsules.map((c) => ({ a: transformPoint(model, c.a), b: transformPoint(model, c.b), r: c.r }));
+      handDisp = quatRotate(q, hand.displacement);
+      const m = capsuleMesh(hand.capsules);
+      renderer.setHandMesh(m.vertices, m.indices);
+    } else {
+      renderer.setHandMesh(new Float32Array(0), new Uint32Array(0));
+    }
     const az = (state.sim.windAzimuth * Math.PI) / 180;
 
     const fs: FrameState = {
@@ -320,12 +356,13 @@ async function main() {
       },
       shadowDensity: state.light.shadowDensity,
       resetSim,
+      hand: { capsules: handCaps, displacement: handDisp, friction: state.hand.friction, margin: 0.0008 },
     };
     resetSim = false;
     renderer.render(fs);
     frame++;
 
-    brushEl.style.display = state.tool.mode === 'orbit' ? 'none' : 'block';
+    brushEl.style.display = state.tool.mode === 'orbit' || state.tool.mode === 'hand' ? 'none' : 'block';
     brushEl.style.left = `${mouse.x}px`;
     brushEl.style.top = `${mouse.y}px`;
     brushEl.style.width = brushEl.style.height = `${state.tool.radius * 2}px`;
@@ -347,7 +384,7 @@ async function main() {
   };
   requestAnimationFrame(loop);
   // Expose for debugging and automated checks.
-  Object.assign(window, { hair: { renderer, state, layers, cam, LANDMARKS } });
+  Object.assign(window, { hair: { renderer, state, layers, cam, LANDMARKS, hand, model: () => lastModel } });
 }
 
 main();

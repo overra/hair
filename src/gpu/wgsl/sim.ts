@@ -93,6 +93,16 @@ fn simulate(@builtin(global_invocation_id) gid: vec3u) {
       collided = true;
     }
 
+    // Finger contact with friction: touching points are dragged along with the
+    // finger (sticking) before being pushed back out of it (sliding).
+    if (F.$.frame.hand.w > 0.0) {
+      let hc = handContact(xc, F.$.frame.hand2.y);
+      if (hc.w > 0.0) {
+        xc = handContact(hc.xyz + F.$.frame.hand.xyz * F.$.frame.hand2.x, F.$.frame.hand2.y).xyz;
+        collided = true;
+      }
+    }
+
     // DFTL: the parent's velocity absorbs part of this correction.
     if (pendValid) {
       L.$.gPrev[pendIdx] = vec4f(pendOld + corr * dftl, 0.0);
