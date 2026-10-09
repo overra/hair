@@ -160,7 +160,8 @@ export class Renderer {
       grow: cp(groom, 'grow'),
       initGuides: cp(groom, 'initGuides'),
       cut: cp(groom, 'cut'),
-      comb: cp(groom, 'comb'),
+      combGuides: cp(groom, 'combGuides'),
+      combFollowers: cp(groom, 'combFollowers'),
       simulate: cp(sim, 'simulate'),
       expand: cp(expand, 'expand'),
       hair: dev.createRenderPipeline({
@@ -321,9 +322,13 @@ export class Renderer {
           pass.dispatchWorkgroups(wg(l.guides));
           l.needsGrow = false;
         }
-        if (s.brush.active && s.frame > 0 && s.brush.mode !== TOOL_HAND) {
-          const tool = s.brush.mode === TOOL_COMB ? 'comb' : 'cut';
-          pass.setPipeline(this.pipes[tool] as GPUComputePipeline);
+        if (s.brush.active && s.frame > 0 && s.brush.mode === TOOL_COMB) {
+          pass.setPipeline(this.pipes.combGuides as GPUComputePipeline);
+          pass.dispatchWorkgroups(wg(l.guides));
+          pass.setPipeline(this.pipes.combFollowers as GPUComputePipeline);
+          pass.dispatchWorkgroups(wg(l.strands));
+        } else if (s.brush.active && s.frame > 0 && (s.brush.mode === TOOL_CUT || s.brush.mode === TOOL_CLIP)) {
+          pass.setPipeline(this.pipes.cut as GPUComputePipeline);
           pass.dispatchWorkgroups(wg(l.strands));
         }
       }

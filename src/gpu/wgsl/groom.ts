@@ -212,35 +212,41 @@ fn cut(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 /**
- * Comb tool (displacement brush, like Blender's curves comb): rest points under
- * the brush move with the brush's per-frame displacement, then segment lengths
- * are restored root → tip and points are kept above the skin. Points beyond the
- * brush follow rigidly, so curls downstream of the brush are preserved.
+ * Comb tool (displacement brush, like Blender's curves comb), in two passes so
+ * guides and their followers stay coherent:
+ *  combGuides    — rest points of each guide under the brush move with the
+ *                  brush's per-frame displacement; lengths are restored root →
+ *                  tip and points kept above the skin; the per-point change is
+ *                  stored in gQ (free scratch: the simulation rewrites it).
+ *  combFollowers — every other strand applies its guide's displacement.
  */
 @compute @workgroup_size(64)
-fn comb(@builtin(global_invocation_id) gid: vec3u) {
-  let s = gid.x;
-  if (s >= S()) { return; }
+fn combGuides(@builtin(global_invocation_id) gid: vec3u) {
+  let g = gid.x;
+  if (g >= G()) { return; }
+  let s = L.$.guideStrand[g];
   let n = NP();
   let M = L.$.params.counts.w;
   let st = L.$.statics[s];
   let drag = F.$.frame.brush2.xyz * F.$.frame.brush2.w;
-  if (dot(drag, drag) < 1e-14) { return; }
-
   var hit = false;
   for (var i = 0u; i < n; i++) {
     tmp[i] = L.$.restS[i * S() + s];
     let j = (i * (M - 1u)) / max(n - 1u, 1u);
-    let w = brushWeight(L.$.render[s * M + j].xyz);
+    let w = select(0.0, brushWeight(L.$.render[s * M + j].xyz), dot(drag, drag) > 1e-14);
     tmp[i].w = w;
     hit = hit || w > 0.0;
   }
-  if (!hit) { return; }
+  if (!hit) {
+    for (var i = 0u; i < n; i++) { L.$.gQ[i * G() + g] = vec4f(0.0); }
+    return;
+  }
   let shell = st.misc.z * 0.5 + 0.0003;
   var prevOld = tmp[0].xyz;
   var prevNew = tmp[0].xyz;
   var carry = vec3f(0.0); // displacement inherited from points closer to the root
   var arc = 0.0;
+  L.$.gQ[g] = vec4f(0.0);
   for (var i = 1u; i < n; i++) {
     let old = tmp[i].xyz;
     let segLen = distance(old, prevOld);
@@ -252,6 +258,36 @@ fn comb(@builtin(global_invocation_id) gid: vec3u) {
     p = keepOutside(p, shell);
     p = prevNew + normalize(p - prevNew) * segLen;
     carry = p - old;
+    arc += segLen;
+    L.$.restS[i * S() + s] = vec4f(p, arc);
+    L.$.gQ[i * G() + g] = vec4f(carry, 1.0);
+    prevOld = old;
+    prevNew = p;
+  }
+}
+
+@compute @workgroup_size(64)
+fn combFollowers(@builtin(global_invocation_id) gid: vec3u) {
+  let s = gid.x;
+  if (s >= S()) { return; }
+  let st = L.$.statics[s];
+  let g = st.ids.w;
+  if (L.$.guideStrand[g] == s) { return; }
+  let n = NP();
+  var moved = false;
+  for (var i = 0u; i < n; i++) { moved = moved || L.$.gQ[i * G() + g].w > 0.0; }
+  if (!moved) { return; }
+  let shell = st.misc.z * 0.5 + 0.0003;
+  var prevOld = L.$.restS[s].xyz;
+  var prevNew = prevOld;
+  var arc = 0.0;
+  for (var i = 1u; i < n; i++) {
+    let old = L.$.restS[i * S() + s].xyz;
+    let segLen = distance(old, prevOld);
+    var p = old + L.$.gQ[i * G() + g].xyz;
+    p = prevNew + normalize(p - prevNew) * segLen;
+    p = keepOutside(p, shell);
+    p = prevNew + normalize(p - prevNew) * segLen;
     arc += segLen;
     L.$.restS[i * S() + s] = vec4f(p, arc);
     prevOld = old;
